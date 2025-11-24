@@ -16,7 +16,6 @@
         }
         .display-4 { font-weight: 500; }
         .chart-container { position: relative; height: 250px; width: 100%; }
-        /* Estilos para los filtros */
         .filter-section { background: white; padding: 15px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
     </style>
 </head>
@@ -26,7 +25,7 @@
     <div class="row mb-4">
         <div class="col text-center">
             <h2>🏥 Monitor de Pacientes <span id="status" class="badge bg-secondary status-badge">Conectando...</span></h2>
-            <p class="text-muted">Visualización y Tendencias</p>
+            <p class="text-muted">Sistema de Alerta Temprana & Histórico</p>
         </div>
     </div>
 
@@ -110,16 +109,19 @@
 
 <script>
     // ==================== 1. CONFIGURACIÓN EMAILJS ====================
-    const EMAIL_SERVICE_ID = "service_f4111tg";   
-    const EMAIL_TEMPLATE_ID = "template_bmroyqk"; 
-    const EMAIL_PUBLIC_KEY = "a7Co68CrPGieYQiN_";   
+    // REEMPLAZA ESTOS VALORES CON LOS TUYOS DE EMAILJS
+    const EMAIL_SERVICE_ID = "service_xxxxxxx";   
+    const EMAIL_TEMPLATE_ID = "template_xxxxxxx"; 
+    const EMAIL_PUBLIC_KEY = "a7Co68CrPGieYQiN_"; // Tu Public Key
+    
     (function() { emailjs.init(EMAIL_PUBLIC_KEY); })();
 
-    let lastEmailTime = 0;
-    const EMAIL_COOLDOWN = 300000; 
-    const HEART_RATE_THRESHOLD = 60; 
+    const EMAIL_COOLDOWN = 300000; // 5 minutos (ms)
+    const HEART_RATE_THRESHOLD = 120; // Alerta si supera esto
+    let isProcessingEmail = false; // Bloqueo local temporal
 
     // ==================== 2. CONFIGURACIÓN FIREBASE ====================
+    // REEMPLAZA ESTOS VALORES CON LOS TUYOS DE FIREBASE
     const firebaseConfig = {
         apiKey: "AIzaSyDZySXGJlJ9q07ncWwInjhKq7IP6-vvrcE", 
         authDomain: "monitorsignosvitales-241cf.firebaseapp.com",
@@ -137,7 +139,7 @@
     const filterStatus = document.getElementById('filter-status');
     
     let historyData = [];
-    let liveListener = null; // Para guardar la referencia del listener en vivo y poder apagarlo
+    let liveListener = null; 
 
     // ==================== 4. GRÁFICAS ====================
     const ctxHR = document.getElementById('chartHR').getContext('2d');
@@ -161,21 +163,15 @@
         options: commonOptions
     });
 
-    // ==================== 5. FUNCIONES DE INTERFAZ ====================
+    // ==================== 5. FUNCIONES PRINCIPALES ====================
 
-    // Función: Limpiar todo (Tabla y Gráficas)
     function clearDashboard() {
-        tableBody.innerHTML = '';
-        historyData = [];
-        chartHR.data.labels = [];
-        chartHR.data.datasets[0].data = [];
-        chartBR.data.labels = [];
-        chartBR.data.datasets[0].data = [];
-        chartHR.update();
-        chartBR.update();
+        tableBody.innerHTML = ''; historyData = [];
+        chartHR.data.labels = []; chartHR.data.datasets[0].data = [];
+        chartBR.data.labels = []; chartBR.data.datasets[0].data = [];
+        chartHR.update(); chartBR.update();
     }
 
-    // Función: Procesar y Dibujar un Dato
     function processAndRenderData(data, prepend = true) {
         let timeString = "Reciente";
         let fullDateString = "";
@@ -194,131 +190,87 @@
         const hr = data.frecuencia_cardiaca || 0;
         const br = data.frecuencia_respiratoria || 0;
 
-        // Agregar a CSV
         historyData.push({ fecha: fullDateString, hr: hr, br: br });
 
-        // Agregar a Gráfica
         chartHR.data.labels.push(timeString);
         chartHR.data.datasets[0].data.push(hr);
         chartBR.data.labels.push(timeString);
         chartBR.data.datasets[0].data.push(br);
 
-        // Si es en vivo, limitamos a 50 puntos para no saturar
         if (prepend && chartHR.data.labels.length > 50) {
             chartHR.data.labels.shift(); chartHR.data.datasets[0].data.shift();
             chartBR.data.labels.shift(); chartBR.data.datasets[0].data.shift();
         }
 
-        chartHR.update();
-        chartBR.update();
+        chartHR.update(); chartBR.update();
 
-        // Agregar a Tabla
         const row = document.createElement('tr');
-        if (prepend) row.className = "new-row"; // Animación solo en vivo
+        if (prepend) row.className = "new-row";
         row.innerHTML = `<td>${timeString}</td><td><strong>${hr}</strong></td><td>${br}</td>`;
         
         if (prepend) {
             tableBody.prepend(row);
             if (tableBody.children.length > 50) tableBody.removeChild(tableBody.lastChild);
         } else {
-            tableBody.appendChild(row); // En histórico agregamos al final para mantener orden cronológico
+            tableBody.appendChild(row);
         }
     }
 
-    // ==================== 6. MODOS DE OPERACIÓN ====================
-
-    // MODO 1: EN VIVO (Default)
     function startLiveMode() {
-        if (liveListener) return; // Ya está corriendo
-
+        if (liveListener) return;
         clearDashboard();
         filterStatus.innerText = "Modo: Monitoreo en Vivo (Últimos 50 datos)";
         filterStatus.className = "text-success d-block mt-2 fw-bold";
 
         const ref = db.ref('mediciones').limitToLast(50);
-        
-        // Guardamos la referencia para poder apagarla luego
         liveListener = ref.on('child_added', (snapshot) => {
             processAndRenderData(snapshot.val(), true);
         });
     }
 
-    // MODO 2: FILTRADO
     function applyFilter() {
         const startVal = document.getElementById('filterStart').value;
         const endVal = document.getElementById('filterEnd').value;
 
-        if (!startVal || !endVal) {
-            alert("Por favor selecciona fecha de inicio y fin.");
-            return;
-        }
-
-        // Convertir Inputs a Timestamp (Segundos) para coincidir con Firebase
-        // Ojo: Date.parse devuelve ms, dividimos por 1000
+        if (!startVal || !endVal) { alert("Selecciona fecha inicio y fin."); return; }
         const startTS = Date.parse(startVal) / 1000;
         const endTS = Date.parse(endVal) / 1000;
 
-        if (startTS > endTS) {
-            alert("La fecha de inicio no puede ser mayor a la fin.");
-            return;
-        }
+        if (startTS > endTS) { alert("Fecha inicio mayor a fin."); return; }
 
-        // 1. Apagar modo en vivo
         if (liveListener) {
             db.ref('mediciones').off('child_added', liveListener);
             liveListener = null;
         }
 
-        // 2. Limpiar UI
         clearDashboard();
-        filterStatus.innerText = "Cargando datos históricos...";
+        filterStatus.innerText = "Cargando histórico...";
         filterStatus.className = "text-warning d-block mt-2 fw-bold";
 
-        // 3. Consultar Firebase (Query por timestamp)
-        db.ref('mediciones')
-          .orderByChild('timestamp')
-          .startAt(startTS)
-          .endAt(endTS)
-          .once('value')
+        db.ref('mediciones').orderByChild('timestamp').startAt(startTS).endAt(endTS).once('value')
           .then((snapshot) => {
               const data = snapshot.val();
               if (data) {
-                  // Firebase devuelve un objeto, lo convertimos a array para ordenar
-                  Object.values(data).forEach(item => {
-                      processAndRenderData(item, false); // false = append (orden cronológico)
-                  });
-                  filterStatus.innerText = `Resultados: ${Object.keys(data).length} registros encontrados.`;
+                  Object.values(data).forEach(item => processAndRenderData(item, false));
+                  filterStatus.innerText = `Resultados: ${Object.keys(data).length}`;
                   filterStatus.className = "text-primary d-block mt-2 fw-bold";
               } else {
-                  filterStatus.innerText = "No se encontraron datos en ese rango.";
+                  filterStatus.innerText = "Sin datos en ese rango.";
                   filterStatus.className = "text-danger d-block mt-2 fw-bold";
               }
-          })
-          .catch(error => {
-              console.error(error);
-              filterStatus.innerText = "Error al consultar datos.";
           });
     }
 
     function resetLiveMode() {
-        // Apagar cualquier listener previo si existiera (por seguridad)
-        if (liveListener) {
-            db.ref('mediciones').off('child_added', liveListener);
-            liveListener = null;
-        }
-        // Limpiar inputs
+        if (liveListener) { db.ref('mediciones').off('child_added', liveListener); liveListener = null; }
         document.getElementById('filterStart').value = "";
         document.getElementById('filterEnd').value = "";
-        
         startLiveMode();
     }
 
-    // ==================== 7. INICIALIZACIÓN ====================
-    
-    // Iniciar en modo en vivo al cargar
+    // ==================== 6. INICIALIZACIÓN Y EVENTOS ====================
     startLiveMode();
 
-    // Estado Conexión
     db.ref('.info/connected').on('value', function(snap) {
         if (snap.val() === true) {
             statusLabel.textContent = "🟢 En Línea"; statusLabel.classList.replace('bg-secondary', 'bg-success');
@@ -327,7 +279,7 @@
         }
     });
 
-    // Listener de TIEMPO REAL (Tarjetas superiores SIEMPRE funcionan)
+    // --- TIEMPO REAL Y ALERTAS (ROBUSTO) ---
     db.ref('actual').on('value', (snapshot) => {
         const data = snapshot.val();
         if (!data) return;
@@ -344,17 +296,34 @@
         }
     });
 
-    // Helpers
+    // --- LÓGICA DE CORREO SIN DUPLICADOS (SYNC FIREBASE) ---
     function checkAndSendEmail(bpm) {
+        if (isProcessingEmail) return; 
+
+        isProcessingEmail = true;
         const now = Date.now();
-        if (now - lastEmailTime > EMAIL_COOLDOWN) {
-            const templateParams = { bpm: bpm, time: new Date().toLocaleTimeString() };
-            emailjs.send(EMAIL_SERVICE_ID, EMAIL_TEMPLATE_ID, templateParams)
-                .then(() => { 
-                    console.log('CORREO ENVIADO'); 
-                    lastEmailTime = now; 
-                });
-        }
+
+        // 1. Consultar última hora de envío en la nube
+        db.ref('system/last_email_timestamp').once('value').then((snapshot) => {
+            const lastGlobalTime = snapshot.val() || 0;
+
+            if (now - lastGlobalTime > EMAIL_COOLDOWN) {
+                console.log("✅ Alerta válida. Enviando...");
+                
+                // 2. Bloquear INMEDIATAMENTE en la nube para que nadie más envíe
+                db.ref('system/last_email_timestamp').set(now);
+
+                // 3. Enviar correo
+                const templateParams = { bpm: bpm, time: new Date().toLocaleTimeString() };
+                emailjs.send(EMAIL_SERVICE_ID, EMAIL_TEMPLATE_ID, templateParams)
+                    .then(() => console.log('CORREO ENVIADO'))
+                    .catch(err => console.log('ERROR CORREO:', err))
+                    .finally(() => isProcessingEmail = false);
+            } else {
+                // Ya se envió uno hace poco
+                isProcessingEmail = false;
+            }
+        });
     }
 
     function updateCard(element, value, warnThresh, dangerThresh, warnClass, dangerClass) {
@@ -368,12 +337,12 @@
     }
 
     function downloadCSV() {
-        if (historyData.length === 0) { alert("No hay datos para exportar."); return; }
+        if (historyData.length === 0) { alert("No hay datos."); return; }
         let csvContent = "data:text/csv;charset=utf-8,Fecha y Hora,Frec. Cardiaca,Frec. Respiratoria\n";
         historyData.forEach(row => csvContent += `${row.fecha},${row.hr},${row.br}\n`);
         const link = document.createElement("a");
         link.setAttribute("href", encodeURI(csvContent));
-        link.setAttribute("download", "reporte_filtrado.csv");
+        link.setAttribute("download", "signos_vitales.csv");
         document.body.appendChild(link); link.click(); document.body.removeChild(link);
     }
 </script>
