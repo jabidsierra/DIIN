@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Monitor Signos Vitales - Pro</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f4f6f9; padding: 20px; }
+        .card-header { background-color: #0d6efd; color: white; font-weight: bold; display: flex; justify-content: space-between; align-items: center; }
+        .status-badge { font-size: 0.8em; margin-left: 10px; }
+        .new-row { animation: highlight 2s ease-out; }
+        @keyframes highlight {
+            0% { background-color: #ffeeba; }
+            100% { background-color: transparent; }
+        }
+        .display-4 { font-weight: 500; }
+        .chart-container { position: relative; height: 250px; width: 100%; }
+        /* Estilos para los filtros */
+        .filter-section { background: white; padding: 15px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="row mb-4">
+        <div class="col text-center">
+            <h2>🏥 Monitor de Pacientes <span id="status" class="badge bg-secondary status-badge">Conectando...</span></h2>
+            <p class="text-muted">Visualización y Tendencias</p>
+        </div>
+    </div>
+
+    <div class="row mb-4 text-center">
+        <div class="col-md-6">
+            <div class="card shadow-sm h-100">
+                <div class="card-body">
+                    <h5 class="card-title text-danger">❤️ Frec. Cardíaca (Actual)</h5>
+                    <h1 class="display-4" id="last-hr">--</h1>
+                    <small>bpm</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card shadow-sm h-100">
+                <div class="card-body">
+                    <h5 class="card-title text-primary">🫁 Frec. Respiratoria (Actual)</h5>
+                    <h1 class="display-4" id="last-br">--</h1>
+                    <small>bpm</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="filter-section">
+        <h5 class="mb-3">🔍 Filtros de Histórico</h5>
+        <div class="row g-3 align-items-end">
+            <div class="col-md-3">
+                <label class="form-label">Fecha Inicio</label>
+                <input type="datetime-local" id="filterStart" class="form-control">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Fecha Fin</label>
+                <input type="datetime-local" id="filterEnd" class="form-control">
+            </div>
+            <div class="col-md-6">
+                <button onclick="applyFilter()" class="btn btn-primary fw-bold">🔎 Buscar</button>
+                <button onclick="resetLiveMode()" class="btn btn-outline-secondary">🔄 Volver al En Vivo</button>
+            </div>
+        </div>
+        <small class="text-muted mt-2 d-block" id="filter-status">Modo: Monitoreo en Vivo (Últimos 50 datos)</small>
+    </div>
+
+    <div class="row mb-4">
+        <div class="col-md-6 mb-3">
+            <div class="card shadow-sm">
+                <div class="card-header bg-white text-danger fw-bold">📈 Tendencia Cardíaca</div>
+                <div class="card-body"><div class="chart-container"><canvas id="chartHR"></canvas></div></div>
+            </div>
+        </div>
+        <div class="col-md-6 mb-3">
+            <div class="card shadow-sm">
+                <div class="card-header bg-white text-primary fw-bold">📈 Tendencia Respiratoria</div>
+                <div class="card-body"><div class="chart-container"><canvas id="chartBR"></canvas></div></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card shadow">
+        <div class="card-header">
+            <span>📜 Historial de Mediciones</span>
+            <button onclick="downloadCSV()" class="btn btn-light btn-sm text-primary fw-bold">⬇️ Exportar CSV</button>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
+                <table class="table table-striped table-hover mb-0">
+                    <thead class="table-light sticky-top">
+                        <tr><th>Hora</th><th>Corazón (BPM)</th><th>Respiración (BPM)</th></tr>
+                    </thead>
+                    <tbody id="tabla-cuerpo"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script type="text/javascript" src="https://cdn.jsdelivr.net/npm/@emailjs/browser@3/dist/email.min.js"></script>
+
+<script>
+    // ==================== 1. CONFIGURACIÓN EMAILJS ====================
+    const EMAIL_SERVICE_ID = "service_f4111tg";   
+    const EMAIL_TEMPLATE_ID = "template_bmroyqk"; 
+    const EMAIL_PUBLIC_KEY = "a7Co68CrPGieYQiN_";   
+    (function() { emailjs.init(EMAIL_PUBLIC_KEY); })();
+
+    let lastEmailTime = 0;
+    const EMAIL_COOLDOWN = 300000; 
+    const HEART_RATE_THRESHOLD = 60; 
+
+    // ==================== 2. CONFIGURACIÓN FIREBASE ====================
+    const firebaseConfig = {
+        apiKey: "AIzaSyDZySXGJlJ9q07ncWwInjhKq7IP6-vvrcE", 
+        authDomain: "monitorsignosvitales-241cf.firebaseapp.com",
+        databaseURL: "https://monitorsignosvitales-241cf-default-rtdb.firebaseio.com",
+        projectId: "monitorsignosvitales-241cf",
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    // ==================== 3. VARIABLES GLOBALES ====================
+    const statusLabel = document.getElementById('status');
+    const tableBody = document.getElementById('tabla-cuerpo');
+    const hrElement = document.getElementById('last-hr');
+    const brElement = document.getElementById('last-br');
+    const filterStatus = document.getElementById('filter-status');
+    
+    let historyData = [];
+    let liveListener = null; // Para guardar la referencia del listener en vivo y poder apagarlo
+
+    // ==================== 4. GRÁFICAS ====================
+    const ctxHR = document.getElementById('chartHR').getContext('2d');
+    const ctxBR = document.getElementById('chartBR').getContext('2d');
+    const commonOptions = {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: { x: { display: false }, y: { beginAtZero: true } },
+        animation: { duration: 0 }
+    };
+
+    const chartHR = new Chart(ctxHR, {
+        type: 'line',
+        data: { labels: [], datasets: [{ label: 'BPM', data: [], borderColor: 'rgb(220, 53, 69)', backgroundColor: 'rgba(220, 53, 69, 0.1)', borderWidth: 2, fill: true, tension: 0.4 }] },
+        options: commonOptions
+    });
+
+    const chartBR = new Chart(ctxBR, {
+        type: 'line',
+        data: { labels: [], datasets: [{ label: 'BPM', data: [], borderColor: 'rgb(13, 110, 253)', backgroundColor: 'rgba(13, 110, 253, 0.1)', borderWidth: 2, fill: true, tension: 0.4 }] },
+        options: commonOptions
+    });
+
+    // ==================== 5. FUNCIONES DE INTERFAZ ====================
+
+    // Función: Limpiar todo (Tabla y Gráficas)
+    function clearDashboard() {
+        tableBody.innerHTML = '';
+        historyData = [];
+        chartHR.data.labels = [];
+        chartHR.data.datasets[0].data = [];
+        chartBR.data.labels = [];
+        chartBR.data.datasets[0].data = [];
+        chartHR.update();
+        chartBR.update();
+    }
+
+    // Función: Procesar y Dibujar un Dato
+    function processAndRenderData(data, prepend = true) {
+        let timeString = "Reciente";
+        let fullDateString = "";
+        
+        if (data.fecha_hora) {
+            timeString = data.fecha_hora.split(" ")[1] || data.fecha_hora;
+            fullDateString = data.fecha_hora;
+        } else if (data.timestamp) {
+            let ts = data.timestamp;
+            if(ts < 10000000000) ts *= 1000;
+            const dateObj = new Date(ts);
+            timeString = dateObj.toLocaleTimeString();
+            fullDateString = dateObj.toLocaleString();
+        }
+
+        const hr = data.frecuencia_cardiaca || 0;
+        const br = data.frecuencia_respiratoria || 0;
+
+        // Agregar a CSV
+        historyData.push({ fecha: fullDateString, hr: hr, br: br });
+
+        // Agregar a Gráfica
+        chartHR.data.labels.push(timeString);
+        chartHR.data.datasets[0].data.push(hr);
+        chartBR.data.labels.push(timeString);
+        chartBR.data.datasets[0].data.push(br);
+
+        // Si es en vivo, limitamos a 50 puntos para no saturar
+        if (prepend && chartHR.data.labels.length > 50) {
+            chartHR.data.labels.shift(); chartHR.data.datasets[0].data.shift();
+            chartBR.data.labels.shift(); chartBR.data.datasets[0].data.shift();
+        }
+
+        chartHR.update();
+        chartBR.update();
+
+        // Agregar a Tabla
+        const row = document.createElement('tr');
+        if (prepend) row.className = "new-row"; // Animación solo en vivo
+        row.innerHTML = `<td>${timeString}</td><td><strong>${hr}</strong></td><td>${br}</td>`;
+        
+        if (prepend) {
+            tableBody.prepend(row);
+            if (tableBody.children.length > 50) tableBody.removeChild(tableBody.lastChild);
+        } else {
+            tableBody.appendChild(row); // En histórico agregamos al final para mantener orden cronológico
+        }
+    }
+
+    // ==================== 6. MODOS DE OPERACIÓN ====================
+
+    // MODO 1: EN VIVO (Default)
+    function startLiveMode() {
+        if (liveListener) return; // Ya está corriendo
+
+        clearDashboard();
+        filterStatus.innerText = "Modo: Monitoreo en Vivo (Últimos 50 datos)";
+        filterStatus.className = "text-success d-block mt-2 fw-bold";
+
+        const ref = db.ref('mediciones').limitToLast(50);
+        
+        // Guardamos la referencia para poder apagarla luego
+        liveListener = ref.on('child_added', (snapshot) => {
+            processAndRenderData(snapshot.val(), true);
+        });
+    }
+
+    // MODO 2: FILTRADO
+    function applyFilter() {
+        const startVal = document.getElementById('filterStart').value;
+        const endVal = document.getElementById('filterEnd').value;
+
+        if (!startVal || !endVal) {
+            alert("Por favor selecciona fecha de inicio y fin.");
+            return;
+        }
+
+        // Convertir Inputs a Timestamp (Segundos) para coincidir con Firebase
+        // Ojo: Date.parse devuelve ms, dividimos por 1000
+        const startTS = Date.parse(startVal) / 1000;
+        const endTS = Date.parse(endVal) / 1000;
+
+        if (startTS > endTS) {
+            alert("La fecha de inicio no puede ser mayor a la fin.");
+            return;
+        }
+
+        // 1. Apagar modo en vivo
+        if (liveListener) {
+            db.ref('mediciones').off('child_added', liveListener);
+            liveListener = null;
+        }
+
+        // 2. Limpiar UI
+        clearDashboard();
+        filterStatus.innerText = "Cargando datos históricos...";
+        filterStatus.className = "text-warning d-block mt-2 fw-bold";
+
+        // 3. Consultar Firebase (Query por timestamp)
+        db.ref('mediciones')
+          .orderByChild('timestamp')
+          .startAt(startTS)
+          .endAt(endTS)
+          .once('value')
+          .then((snapshot) => {
+              const data = snapshot.val();
+              if (data) {
+                  // Firebase devuelve un objeto, lo convertimos a array para ordenar
+                  Object.values(data).forEach(item => {
+                      processAndRenderData(item, false); // false = append (orden cronológico)
+                  });
+                  filterStatus.innerText = `Resultados: ${Object.keys(data).length} registros encontrados.`;
+                  filterStatus.className = "text-primary d-block mt-2 fw-bold";
+              } else {
+                  filterStatus.innerText = "No se encontraron datos en ese rango.";
+                  filterStatus.className = "text-danger d-block mt-2 fw-bold";
+              }
+          })
+          .catch(error => {
+              console.error(error);
+              filterStatus.innerText = "Error al consultar datos.";
+          });
+    }
+
+    function resetLiveMode() {
+        // Apagar cualquier listener previo si existiera (por seguridad)
+        if (liveListener) {
+            db.ref('mediciones').off('child_added', liveListener);
+            liveListener = null;
+        }
+        // Limpiar inputs
+        document.getElementById('filterStart').value = "";
+        document.getElementById('filterEnd').value = "";
+        
+        startLiveMode();
+    }
+
+    // ==================== 7. INICIALIZACIÓN ====================
+    
+    // Iniciar en modo en vivo al cargar
+    startLiveMode();
+
+    // Estado Conexión
+    db.ref('.info/connected').on('value', function(snap) {
+        if (snap.val() === true) {
+            statusLabel.textContent = "🟢 En Línea"; statusLabel.classList.replace('bg-secondary', 'bg-success');
+        } else {
+            statusLabel.textContent = "🔴 Desconectado"; statusLabel.classList.replace('bg-success', 'bg-danger');
+        }
+    });
+
+    // Listener de TIEMPO REAL (Tarjetas superiores SIEMPRE funcionan)
+    db.ref('actual').on('value', (snapshot) => {
+        const data = snapshot.val();
+        if (!data) return;
+
+        const hrRaw = data.frecuencia_cardiaca;
+        const brRaw = data.frecuencia_respiratoria;
+        const hrNum = parseFloat(hrRaw);
+        
+        updateCard(hrElement, hrRaw, 80, 120, 'text-warning', 'text-danger');
+        updateCard(brElement, brRaw, 20, 20, 'text-warning', 'text-danger');
+
+        if (!isNaN(hrNum) && hrNum >= HEART_RATE_THRESHOLD) {
+            checkAndSendEmail(hrNum);
+        }
+    });
+
+    // Helpers
+    function checkAndSendEmail(bpm) {
+        const now = Date.now();
+        if (now - lastEmailTime > EMAIL_COOLDOWN) {
+            const templateParams = { bpm: bpm, time: new Date().toLocaleTimeString() };
+            emailjs.send(EMAIL_SERVICE_ID, EMAIL_TEMPLATE_ID, templateParams)
+                .then(() => { 
+                    console.log('CORREO ENVIADO'); 
+                    lastEmailTime = now; 
+                });
+        }
+    }
+
+    function updateCard(element, value, warnThresh, dangerThresh, warnClass, dangerClass) {
+        const num = parseFloat(value);
+        element.className = "display-4"; 
+        if (!isNaN(num)) {
+            if (num >= dangerThresh) element.classList.add(dangerClass);
+            else if (num > warnThresh) element.classList.add(warnClass);
+        }
+        element.innerText = (value !== undefined) ? value : '--';
+    }
+
+    function downloadCSV() {
+        if (historyData.length === 0) { alert("No hay datos para exportar."); return; }
+        let csvContent = "data:text/csv;charset=utf-8,Fecha y Hora,Frec. Cardiaca,Frec. Respiratoria\n";
+        historyData.forEach(row => csvContent += `${row.fecha},${row.hr},${row.br}\n`);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodeURI(csvContent));
+        link.setAttribute("download", "reporte_filtrado.csv");
+        document.body.appendChild(link); link.click(); document.body.removeChild(link);
+    }
+</script>
+
+</body>
+</html>
